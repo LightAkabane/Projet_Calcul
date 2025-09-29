@@ -1,44 +1,29 @@
-// main.ts
+// main.ts — WebGPU-first + fallback WASM, decode YOLOv8 concat (8400)
 
 // ---------- Types ----------
 import type * as ortTypes from 'onnxruntime-web';
-// ---------- Utils YOLO ----------
+
+// ---------- Hyperparams ----------
 const INPUT_SIZE = 640;
-
-// Seuil final (après produit obj*cls). On peut le laisser raisonnable :
-const SCORE_THRESH = 0.55;
-
-// Rendez NMS un poil plus agressif (plus de suppression)
 const NMS_IOU = 0.40;
-
-// Limite globale (après NMS)
 const MAX_DETECTIONS = 100;
+const TOPK_PER_HEAD = 400;
+const SCORE_THRESH = 0.30;   // 0.55 -> 0.30
+const OBJ_THRESH   = 0.25;   // 0.45 -> 0.25
+const PERSON_THRESH= 0.25;   // 0.45 -> 0.25
+const MIN_SIDE_FRAC= 0.015;  // 0.02  -> 0.015
 
-// Gating AVANT NMS (indépendant)
-// → ça coupe le bruit des cellules qui “cliquettent” juste un peu
-const OBJ_THRESH = 0.45;      // objectness mini
-const PERSON_THRESH = 0.45;   // prob. de la classe 'person' mini
 
-// Top-K par tête (par stride) AVANT fusion globale
-const TOPK_PER_HEAD = 400;    // tu peux descendre à 300/200 si besoin
-
-// Taille mini (en pixels vidéo) pour écarter les micro-boîtes parasites
-const MIN_SIDE_FRAC = 0.02;   // 2% du côté le plus court du flux vidéo
-
-// ---------- ONNX Runtime (WASM 1.19.2) ----------
+// ---------- ONNX Runtime ----------
 let ort: typeof import('onnxruntime-web');
+let session: ortTypes.InferenceSession | null = null;
+
 let INPUT_LAYOUT: 'NCHW' | 'NHWC' = 'NHWC';
 let INPUT_NAME = '';
 const MIRROR = true; // ta <video> est en transform: scaleX(-1)
 
-async function loadOrt(): Promise<'wasm'> {
-  ort = await import('onnxruntime-web'); // assure onnxruntime-web@1.19.2
-  return 'wasm';
-}
-
 // ---------- Chemins / options ----------
-const MODEL_PATH = '/yolov8m.onnx';
-const WASM_CDN_BASE = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
+const MODEL_PATH = '/yolov8n.onnx'; // mets ici ton .onnx (patché ou non)
 
 // ---------- DOM ----------
 const videoEl = document.getElementById('cam') as HTMLVideoElement | null;
@@ -66,8 +51,6 @@ function resizeOverlayToVideo() {
   }
 }
 
-
-
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
 function iou(a: number[], b: number[]): number {
@@ -79,6 +62,7 @@ function iou(a: number[], b: number[]): number {
   const areaB = (bx2 - bx1) * (ay2 - by1);
   return inter / (areaA + areaB - inter + 1e-6);
 }
+
 function nms(boxes: number[][], scores: number[], iouTh = NMS_IOU, limit = MAX_DETECTIONS): number[] {
   const order = scores.map((s, i) => [s, i]).sort((a, b) => b[0] - a[0]).map(([, i]) => i);
   const keep: number[] = [];
@@ -94,20 +78,19 @@ function nms(boxes: number[][], scores: number[], iouTh = NMS_IOU, limit = MAX_D
 }
 
 // --- Accessor générique pour têtes 2D/3D/4D ---
-// Renvoie un accès get(ch, i) avec i = index aplati (y*W + x) si grille
 type Accessor = {
-  N: number;             // nombre de points (H*W ou N direct)
-  C: number;             // nombre de canaux (>= 5)
+  N: number;  // points (H*W ou N)
+  C: number;  // >= 5
   get: (c: number, i: number) => number;
 };
+
 function makeAccessor(t: ortTypes.Tensor): Accessor | null {
   const dims = t.dims;
   const data = t.data as Float32Array;
 
-  // 4D: [1, H, W, C] ou [1, C, H, W] (ou sans le 1 si exotique)
+  // 4D: [1, H, W, C] ou [1, C, H, W]
   if (dims.length === 4) {
     const [d0,d1,d2,d3] = dims;
-    // [1, H, W, C]
     if (d0 === 1 && d3 >= 5) {
       const H = d1, W = d2, C = d3, N = H * W;
       return {
@@ -115,12 +98,10 @@ function makeAccessor(t: ortTypes.Tensor): Accessor | null {
         get: (ch, i) => {
           const x = i % W;
           const y = (i - x) / W;
-          // NHWC: index = y*W*C + x*C + ch
           return data[(y * W + x) * C + ch];
         }
       };
     }
-    // [1, C, H, W]
     if (d0 === 1 && d1 >= 5) {
       const C = d1, H = d2, W = d3, N = H * W;
       return {
@@ -128,47 +109,40 @@ function makeAccessor(t: ortTypes.Tensor): Accessor | null {
         get: (ch, i) => {
           const x = i % W;
           const y = (i - x) / W;
-          // NCHW: index = ch*H*W + y*W + x
           return data[ch * H * W + y * W + x];
         }
       };
     }
   }
 
-  // 3D variantes
+  // 3D
   if (dims.length === 3) {
     const [a, b, c] = dims;
-    // [1,84,N]
     if (a === 1 && b >= 5) {
       const C = b, N = c;
       return { N, C, get: (ch,i) => data[ch*N + i] };
     }
-    // [1,N,84]
     if (a === 1 && c >= 5) {
       const N = b, C = c;
       return { N, C, get: (ch,i) => data[i*C + ch] };
     }
-    // [84,1,N]
     if (b === 1 && a >= 5) {
       const C = a, N = c;
       return { N, C, get: (ch,i) => data[ch*N + i] };
     }
-    // [N,1,84]
     if (b === 1 && c >= 5) {
       const N = a, C = c;
       return { N, C, get: (ch,i) => data[i*C + ch] };
     }
   }
 
-  // 2D variantes
+  // 2D
   if (dims.length === 2) {
     const [a, b] = dims;
-    // [C, N]
     if (a >= 5) {
       const C = a, N = b;
       return { N, C, get: (ch,i) => data[ch*N + i] };
     }
-    // [N, C]
     if (b >= 5) {
       const N = a, C = b;
       return { N, C, get: (ch,i) => data[i*C + ch] };
@@ -176,10 +150,36 @@ function makeAccessor(t: ortTypes.Tensor): Accessor | null {
   }
 
   console.warn('makeAccessor: forme inattendue ignorée:', dims);
-  return null; // on ignore cette tête
+  return null;
 }
 
-// --- Décodage YOLOv8 (anchor-free) pour têtes brutes (H*W*C) ---
+// ---------- Décodage YOLOv8 (anchor-free) ----------
+
+// tailles des têtes pour INPUT_SIZE (v8: strides 8/16/32)
+const HEAD_GS = [INPUT_SIZE / 8, INPUT_SIZE / 16, INPUT_SIZE / 32].map(v => Math.round(v)); // [80,40,20] si 640
+const HEAD_COUNTS = HEAD_GS.map(g => g * g); // [6400,1600,400]
+const HEAD_OFFSETS = [0, HEAD_COUNTS[0], HEAD_COUNTS[0] + HEAD_COUNTS[1]]; // [0,6400,8000]
+const SUM_HEADS = HEAD_COUNTS.reduce((a,b)=>a+b,0); // 8400 pour 640
+
+function gridInfoForIndex(i: number) {
+  if (i < HEAD_OFFSETS[1]) {
+    const g = HEAD_GS[0], base = HEAD_OFFSETS[0];
+    const ii = i - base;
+    const cx = ii % g, cy = (ii - cx) / g;
+    return { g, cx, cy, stride: INPUT_SIZE / g };
+  } else if (i < HEAD_OFFSETS[2]) {
+    const g = HEAD_GS[1], base = HEAD_OFFSETS[1];
+    const ii = i - base;
+    const cx = ii % g, cy = (ii - cx) / g;
+    return { g, cx, cy, stride: INPUT_SIZE / g };
+  } else {
+    const g = HEAD_GS[2], base = HEAD_OFFSETS[2];
+    const ii = i - base;
+    const cx = ii % g, cy = (ii - cx) / g;
+    return { g, cx, cy, stride: INPUT_SIZE / g };
+  }
+}
+
 function decodeYoloV8(
   results: Record<string, ortTypes.Tensor>,
   letter: { sx:number, sy:number, dw:number, dh:number, rw:number, rh:number }
@@ -197,45 +197,49 @@ function decodeYoloV8(
     if (!acc) continue;
     const { N, C, get } = acc;
 
-    // stride via taille de grille
-    const g = Math.max(1, Math.round(Math.sqrt(N)));   // ex: 80, 40, 20
-    const stride = INPUT_SIZE / g;
-
     const numClasses = Math.max(0, C - 5);
     if (numClasses < 1) continue;
 
-    // Collecte locale pour faire un Top-K *par tête*
     const headBoxes:number[][] = [];
     const headScores:number[] = [];
 
     for (let i=0; i<N; i++) {
-      const cx = i % g;
-      const cy = (i - cx) / g;
+      // --- grilles/stride corrects (concat 8400) ---
+      let g:number, cx:number, cy:number, stride:number;
+      if (N === SUM_HEADS) {
+        const gi = gridInfoForIndex(i);
+        g = gi.g; cx = gi.cx; cy = gi.cy; stride = gi.stride;
+      } else {
+        // fallback si têtes séparées: approx selon sqrt(N)
+        g = Math.max(1, Math.round(Math.sqrt(N)));
+        stride = INPUT_SIZE / g;
+        cx = i % g;
+        cy = (i - cx) / g;
+      }
 
       // logits
       const tx = get(0,i),  ty = get(1,i),  tw = get(2,i),  th = get(3,i);
       const to = get(4,i);               // objectness
       const tPerson = get(5 + 0, i);     // classe 0 = person (COCO)
 
-      const pObj = 1/(1+Math.exp(-to));
-      const pCls = 1/(1+Math.exp(-tPerson));
+      const pObj = sigmoid(to);
+      const pCls = sigmoid(tPerson);
 
-      // Gating indépendant (coupe beaucoup de bruit)
+      // gating indépendant
       if (pObj < OBJ_THRESH || pCls < PERSON_THRESH) continue;
 
       // Décodage YOLOv8 (anchor-free)
-      const x = ((1/(1+Math.exp(-tx)) * 2 - 0.5) + cx) * stride;
-      const y = ((1/(1+Math.exp(-ty)) * 2 - 0.5) + cy) * stride;
-      const w =  ( (1/(1+Math.exp(-tw)) * 2) ** 2 ) * stride;
-      const h =  ( (1/(1+Math.exp(-th)) * 2) ** 2 ) * stride;
+      const x = ((sigmoid(tx) * 2 - 0.5) + cx) * stride;
+      const y = ((sigmoid(ty) * 2 - 0.5) + cy) * stride;
+      const w =  ( (sigmoid(tw) * 2) ** 2 ) * stride;
+      const h =  ( (sigmoid(th) * 2) ** 2 ) * stride;
 
-      // Taille mini (évite les boîtes parasites)
       if (w < minSidePx || h < minSidePx) continue;
 
       const conf = pObj * pCls;
       if (conf < SCORE_THRESH) continue;
 
-      // xywh -> xyxy dans l’espace 640x640
+      // xywh -> xyxy (espace 640)
       const x1l = x - w/2, y1l = y - h/2, x2l = x + w/2, y2l = y + h/2;
 
       // dé-letterbox -> pixels vidéo
@@ -251,7 +255,7 @@ function decodeYoloV8(
       headScores.push(conf);
     }
 
-    // --- Top-K par tête avant fusion globale ---
+    // Top-K par tête avant fusion globale
     if (headBoxes.length > TOPK_PER_HEAD) {
       const order = headScores.map((s,i)=>[s,i]).sort((a,b)=>b[0]-a[0]).slice(0, TOPK_PER_HEAD).map(p=>p[1]);
       for (const idx of order) {
@@ -264,11 +268,10 @@ function decodeYoloV8(
     }
   }
 
-  // NMS class-agnostic (on ne garde que 'person')
+  // NMS class-agnostic (person uniquement)
   const keep = nms(allBoxes, allScores, NMS_IOU, MAX_DETECTIONS);
   return keep.map(k => ({ box: allBoxes[k], score: allScores[k], cls: 0, label: 'person' }));
 }
-
 
 // ---------- Dessin ----------
 function drawDetections(dets: { box:number[], score:number, cls:number, label:string }[]) {
@@ -328,26 +331,45 @@ function drawDetections(dets: { box:number[], score:number, cls:number, label:st
   if (channelEl) channelEl.textContent = people > 0 ? `AV1 (${people})` : 'AV1';
 }
 
-// ---------- ORT session + boucle ----------
-let session: ortTypes.InferenceSession | null = null;
-let running = false;
+// ---------- Chargement ORT + sessions ----------
+async function loadOrt(): Promise<void> {
+  const hasWebGPU = typeof navigator !== 'undefined' && !!(navigator as any).gpu;
 
-async function initDetector() {
-  await loadOrt(); // WASM
+  if (hasWebGPU) {
+    // Import WebGPU en priorité
+    const ortWebgpu = await import('onnxruntime-web/webgpu');
+    // Même en WebGPU, ORT s’appuie sur des artefacts .wasm -> pin CDN
+    (ortWebgpu as any).env.wasm = (ortWebgpu as any).env.wasm || {};
+    (ortWebgpu as any).env.wasm.wasmPaths =
+      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
 
-  if ((ort as any)?.env?.wasm) {
-    (ort as any).env.wasm.wasmPaths = WASM_CDN_BASE; // CDN piné 1.19.2
-    (ort as any).env.wasm.simd = true;
-    (ort as any).env.wasm.numThreads = 1;   // dev non-COI => 1 thread
-    (ort as any).env.wasm.proxy = false;    // pas de worker/proxy
-    (ort as any).env.wasm.wasmFile = 'ort-wasm-simd.wasm'; // non-threaded
+    (ortWebgpu as any).env.webgpu = (ortWebgpu as any).env.webgpu || {};
+    (ortWebgpu as any).env.webgpu.powerPreference = 'high-performance';
+    (ortWebgpu as any).env.webgpu.enableGraphCapture = true;
+
+    // @ts-ignore
+    ort = ortWebgpu;
+    return;
   }
 
-  session = await ort.InferenceSession.create(MODEL_PATH, {
-    executionProviders: ['wasm'] as any
-  });
+  // Fallback WASM
+  const ortWasm = await import('onnxruntime-web');
+  (ortWasm as any).env.wasm = (ortWasm as any).env.wasm || {};
+  (ortWasm as any).env.wasm.wasmPaths =
+    'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
+  (ortWasm as any).env.wasm.simd = true;
+  (ortWasm as any).env.wasm.numThreads = 1; // si COOP/COEP: tu peux monter et charger le .threaded
+  (ortWasm as any).env.wasm.proxy = false;
+  (ortWasm as any).env.wasm.wasmFile = 'ort-wasm-simd.wasm';
 
-  // Déduire le layout si possible (NCHW/NHWC)
+  // @ts-ignore
+  ort = ortWasm;
+}
+
+async function createSessionWithEPs(eps: ('webgpu'|'wasm')[]) {
+  session = await ort.InferenceSession.create(MODEL_PATH, {
+    executionProviders: eps as any
+  });
   INPUT_NAME = session.inputNames[0];
   const meta: any = (session as any).inputMetadata?.[INPUT_NAME];
   const dims: number[] = meta?.dimensions ?? [];
@@ -355,12 +377,21 @@ async function initDetector() {
     if (dims[1] === 3) INPUT_LAYOUT = 'NCHW';
     else if (dims[3] === 3) INPUT_LAYOUT = 'NHWC';
   }
-
-  console.log('Input dims:', dims, 'Layout:', INPUT_LAYOUT);
-  console.log('ORT inputs:', session.inputNames);
-  console.log('ORT outputs:', session.outputNames);
+  console.log('[ORT] EPs:', eps);
+  console.log('[ORT] Input dims:', dims, 'Layout:', INPUT_LAYOUT);
+  console.log('[ORT] Inputs:', session.inputNames);
+  console.log('[ORT] Outputs:', session.outputNames);
 }
 
+let running = false;
+
+async function initDetector() {
+  await loadOrt();
+  // On tente WebGPU puis WASM en secours
+  await createSessionWithEPs(['webgpu','wasm']);
+}
+
+// ---------- Boucle d'inférence ----------
 async function inferLoop() {
   if (!session || videoEl!.readyState < 2) { requestAnimationFrame(inferLoop); return; }
   resizeOverlayToVideo();
@@ -412,13 +443,24 @@ async function inferLoop() {
     results = await session.run(feeds);
   } catch (e: any) {
     const msg = String(e?.message || e);
-    if (msg.includes('Got: 3 Expected: 640') && msg.includes('Got: 640 Expected: 3')) {
+
+    // Softmax non supporté (axe ≠ dernier) côté WebGPU -> recrée en WASM only
+    const softmaxBadAxis =
+      msg.includes('softmax only supports last axis for now') ||
+      (msg.includes('Softmax') && msg.toLowerCase().includes('failed'));
+
+    if (softmaxBadAxis) {
+      console.warn('[ORT] Softmax not-supported on WebGPU -> Recreate session in WASM only');
+      await createSessionWithEPs(['wasm']);
+      results = await session!.run(feeds);
+    } else if (msg.includes('Got: 3 Expected: 640') && msg.includes('Got: 640 Expected: 3')) {
       INPUT_LAYOUT = (INPUT_LAYOUT === 'NHWC') ? 'NCHW' : 'NHWC';
       console.warn('Layout auto-switch ->', INPUT_LAYOUT);
       requestAnimationFrame(inferLoop);
       return;
+    } else {
+      throw e;
     }
-    throw e;
   }
 
   const dets = decodeYoloV8(results, letterbox);
