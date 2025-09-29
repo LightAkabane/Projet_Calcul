@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Caméra AV1</title>
+<script type="module" src="/main.ts"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@300;400&family=VT323&display=swap" rel="stylesheet">
+<style>
+/* ---- Ton style inchangé + petits ajouts pour la vidéo ---- */
+@keyframes screen-turn-on {
+  0% { width:0%; height:1px; border-radius:0; background-color:#b0b0b0; }
+  50% { width:100%; height:1px; border-radius:0; background-color:#b0b0b0; }
+  51% { width:100%; height:1px; border-radius:0; background-color:#b0b0b0; }
+  70% { width:100%; height:1px; border-radius:0; background-color:#b0b0b0; }
+  80% { width:100%; height:calc(100vh - 60px); border-radius:5px; background-color:#b0b0b0; }
+  100% { width:100%; height:calc(100vh - 60px); border-radius:5px; background-color:#454545; }
+}
+@keyframes shiver {
+  0%{transform:translate(1px,1px);text-shadow:6px 0 rgba(255,0,0,.9),-6px 0 rgba(0,0,255,.9)}
+  5%{transform:translate(1px,1px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+  10%{transform:translate(1px,1px);text-shadow:5px 0 rgba(255,0,0,.9),-5px 0 rgba(0,0,255,.9)}
+  15%{transform:translate(1px,1px);text-shadow:7px 0 rgba(255,0,0,.9),-7px 0 rgba(0,0,255,.9)}
+  20%{transform:translate(1px,2px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  25%{transform:translate(1px,2px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  30%{transform:translate(1px,2px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+  35%{transform:translate(1px,2px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  40%{transform:translate(2px,1px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  45%{transform:translate(2px,1px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+  50%{transform:translate(2px,1px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+  55%{transform:translate(2px,1px);text-shadow:4px 0 rgba(255,0,0,.9),-4px 0 rgba(0,0,255,.9)}
+  60%{transform:translate(1px,1px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  65%{transform:translate(1px,1px);text-shadow:5px 0 rgba(255,0,0,.9),-5px 0 rgba(0,0,255,.9)}
+  70%{transform:translate(1px,1px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+  75%{transform:translate(1px,1px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  80%{transform:translate(2px,1px);text-shadow:5px 0 rgba(255,0,0,.9),-5px 0 rgba(0,0,255,.9)}
+  85%{transform:translate(2px,1px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+  90%{transform:translate(2px,2px);text-shadow:5px 0 rgba(255,0,0,.9),-5px 0 rgba(0,0,255,.9)}
+  95%{transform:translate(2px,2px);text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9)}
+  100%{transform:translate(1px,2px);text-shadow:3px 0 rgba(255,0,0,.9),-3px 0 rgba(0,0,255,.9)}
+}
+body,#screen{-webkit-user-select:none;-moz-user-select:none;-o-user-select:none;-ms-user-select:none;user-select:none;box-sizing:border-box}
+body{margin:0;background:#000;font-family:"Source Code Pro",monospace;overflow:hidden}
+
+#screen{position:relative;margin:30px;height:calc(100vh - 60px);width:calc(100vw - 60px);
+  background:#0a0a0a;color:#fff;text-shadow:2px 0 rgba(255,0,0,.9),-2px 0 rgba(0,0,255,.9);border-radius:5px}
+.on #screen{background-color:#222}
+#content-holder{padding:0;height:calc(100vh - 60px);width:calc(100vw - 60px);display:flex;justify-content:center;align-items:center;text-align:center;overflow:hidden}
+#content{background-color:#b0b0b0;display:flex;justify-content:center;align-items:center;text-align:center;overflow:hidden;height:0;position:relative}
+.on #content{animation:screen-turn-on .4s linear .5s 1 forwards}
+#power{bottom:12px;width:35px;height:5px;position:absolute;right:45px;background:#282828;cursor:pointer}
+.on #power{background:#0035ff;box-shadow:0 0 20px 2px #0035ff}
+#channel{position:absolute;top:15px;left:25px;font-size:4vw;font-family:"VT323",monospace;color:#fbff68;animation:shiver 1s linear .5s infinite;z-index:2}
+#text{color:#ededed;text-align:left;font-weight:200;text-transform:uppercase;font-size:3vw;animation:shiver 1s linear .5s infinite;z-index:2}
+
+/* --- Ajouts pour la vidéo --- */
+#video-holder { position:absolute; inset:0; overflow:hidden; }
+#cam, #overlay { position:absolute; inset:0; width:100%; height:100%; display:block; }
+#overlay { pointer-events:none; z-index:2; } /* au-dessus de la vidéo, mais n'intercepte rien */
+
+#cam{
+  width:100%; height:100%; object-fit:cover; filter:contrast(1.05) saturate(1.05) brightness(.95);transform: scaleX(-1);
+}
+.hidden{display:none;}
+</style>
+</head>
+<body id="wrapper" class="on">
+  <div id="screen">
+    <div id="content-holder">
+      <div id="content">
+        <div id="app">
+          <div id="channel">AV1</div>
+          <div id="text">No input signal.</div>
+        </div>
+        <div id="video-holder" class="hidden">
+            <video id="cam" autoplay playsinline muted></video>
+            <canvas id="overlay"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="power" onclick="power();"></div>
+
+<script>
+/* Gestion power + caméra */
+let currentStream = null;
+const wrapper = document.getElementById("wrapper");
+const textEl = document.getElementById("text");
+const videoHolder = document.getElementById("video-holder");
+const videoEl = document.getElementById("cam");
+const channelEl = document.getElementById("channel");
+
+async function startCamera() {
+  try {
+    textEl.textContent = "Connecting...";
+    // Choix de contraintes plutôt « safe » ; ajuste si besoin
+    const constraints = {
+      video: {
+        facingMode: 'user',
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
+      audio: false
+    };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    currentStream = stream;
+    videoEl.srcObject = stream;
+    await videoEl.play();
+    // UI
+    videoHolder.classList.remove("hidden");
+    textEl.classList.add("hidden");
+    channelEl.textContent = "AV1";
+  } catch (err) {
+    console.error(err);
+    textEl.textContent = "Camera error: " + (err && err.message ? err.message : err);
+    videoHolder.classList.add("hidden");
+    textEl.classList.remove("hidden");
+    channelEl.textContent = "NO SIGNAL";
+  }
+}
+function stopCamera() {
+  if (currentStream) {
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+  videoEl.pause();
+  videoEl.srcObject = null;
+  videoHolder.classList.add("hidden");
+  textEl.textContent = "No input signal.";
+  textEl.classList.remove("hidden");
+  channelEl.textContent = "AV1";
+}
+
+function power() {
+  wrapper.className = (wrapper.className === "on") ? "off" : "on";
+  if (wrapper.className === "on") {
+    setTimeout(async () => {
+      await startCamera();
+      if (window.startDetection) window.startDetection();   // <<< ajout
+    }, 650);
+  } else {
+    if (window.stopDetection) window.stopDetection();       // <<< ajout
+    stopCamera();
+  }
+}
+
+// Démarrage auto si supporté
+window.addEventListener('load', () => {
+  if (!('mediaDevices' in navigator) || !('getUserMedia' in navigator.mediaDevices)) {
+    textEl.textContent = "Webcam non supportée par ce navigateur.";
+    return;
+  }
+  // Si la page démarre "on", on lance
+  if (wrapper.classList.contains('on')) {
+    setTimeout(() => startCamera(), 800);
+  }
+});
+
+// Bonus: redimensionnement iOS pour éviter des weirdness
+window.addEventListener('resize', () => {
+  if (videoEl && !videoEl.paused) {
+    // rien de spécial ici, l'object-fit s'occupe de tout
+  }
+});
+
+</script>
+</body>
+</html>

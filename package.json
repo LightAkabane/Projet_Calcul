@@ -1,0 +1,19 @@
+{
+  "name": "projet_calcul",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "mkdir -p public/ort && cp node_modules/onnxruntime-web/dist/ort-wasm*.wasm public/ort/"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.19.2"
+  }
+}
