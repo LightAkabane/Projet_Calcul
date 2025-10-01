@@ -12,8 +12,8 @@ def invert_perm(perm):
         inv[p] = i
     return inv
 
-model_in  = "yolov8n.onnx"          # <- ton fichier exporté
-model_out = "yolov8n_webgpu.onnx"   # <- sortie patchée
+model_in  = "yolov8m.onnx"          # <- ton fichier exporté
+model_out = "yolov8m_webgpu.onnx"   # <- sortie patchée
 
 print(f"Loading {model_in} ...")
 model = onnx.load(model_in)
