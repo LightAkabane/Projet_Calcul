@@ -57,8 +57,7 @@ body{margin:0;background:#000;font-family:"Source Code Pro",monospace;overflow:h
 /* --- Ajouts pour la vidéo --- */
 #video-holder { position:absolute; inset:0; overflow:hidden; }
 #cam, #overlay { position:absolute; inset:0; width:100%; height:100%; display:block; }
-#overlay { pointer-events:none; z-index:2; } /* au-dessus de la vidéo, mais n'intercepte rien */
-
+#overlay { pointer-events:none; z-index:2; will-change:transform, contents; }
 #cam{
   width:100%; height:100%; object-fit:cover; filter:contrast(1.05) saturate(1.05) brightness(.95);transform: scaleX(-1);
 }

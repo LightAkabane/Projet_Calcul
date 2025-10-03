@@ -1,6 +1,5 @@
-// main.ts — WebGPU only (no WASM), decode YOLOv8 concat (8400)
+// main.ts — WebGPU only (no WASM), YOLOv8 persons, optimisé allocations + boucle vidéo
 
-// ---------- Types ----------
 import type * as ortTypes from 'onnxruntime-web';
 
 // ---------- Hyperparams ----------
@@ -13,15 +12,12 @@ const OBJ_THRESH   = 0.25;
 const PERSON_THRESH= 0.25;
 const MIN_SIDE_FRAC= 0.015;
 
-// ---------- ONNX Runtime ----------
 let ort: typeof import('onnxruntime-web');
 let session: ortTypes.InferenceSession | null = null;
 
 let INPUT_LAYOUT: 'NCHW' | 'NHWC' = 'NHWC';
 let INPUT_NAME = '';
 const MIRROR = true;
-
-// ---------- Chemins / options ----------
 const MODEL_PATH = '/yolov8n.onnx';
 
 // ---------- DOM ----------
@@ -35,41 +31,68 @@ if (!overlay) throw new Error('#overlay introuvable (canvas)');
 const overlayCtx = overlay.getContext('2d');
 if (!overlayCtx) throw new Error('Context 2D indisponible pour #overlay');
 
-// DPI-safe resize du canvas
-function resizeOverlayToVideo() {
+// ---------- Canvases & buffers réutilisés ----------
+const preprocessCanvas = document.createElement('canvas');
+preprocessCanvas.width = INPUT_SIZE;
+preprocessCanvas.height = INPUT_SIZE;
+// Hint de perf : on lit des pixels à chaque frame
+const pctx = preprocessCanvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
+
+// Buffers réutilisés pour le tenseur
+const SIZE = INPUT_SIZE * INPUT_SIZE;
+const nhwcBuf = new Float32Array(3 * SIZE);
+const nchwBuf = new Float32Array(3 * SIZE);
+
+// State overlay/viewport
+let lastDpr = 0;
+let lastRectW = 0;
+let lastRectH = 0;
+
+// DPI-safe resize du canvas mais seulement quand nécessaire
+function resizeOverlayToVideoIfNeeded() {
   const rect = overlay!.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  overlay!.style.width = '100%';
-  overlay!.style.height = '100%';
-  const w = Math.max(1, Math.floor(rect.width * dpr));
-  const h = Math.max(1, Math.floor(rect.height * dpr));
-  if (overlay!.width !== w || overlay!.height !== h) {
-    overlay!.width = w;
-    overlay!.height = h;
+
+  if (overlay!.width !== Math.floor(rect.width * dpr) ||
+      overlay!.height !== Math.floor(rect.height * dpr) ||
+      lastDpr !== dpr || lastRectW !== rect.width || lastRectH !== rect.height) {
+
+    overlay!.style.width = '100%';
+    overlay!.style.height = '100%';
+    overlay!.width = Math.max(1, Math.floor(rect.width * dpr));
+    overlay!.height = Math.max(1, Math.floor(rect.height * dpr));
+
     overlayCtx!.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    lastDpr = dpr;
+    lastRectW = rect.width;
+    lastRectH = rect.height;
   }
 }
 
 const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
+// BUGFIX: areaB utilisait (ay2 - by1) -> doit être (by2 - by1)
 function iou(a: number[], b: number[]): number {
   const [ax1, ay1, ax2, ay2] = a, [bx1, by1, bx2, by2] = b;
-  const iw = Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1));
-  const ih = Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1));
+  const iw = ax2 < bx1 || bx2 < ax1 ? 0 : Math.max(0, Math.min(ax2, bx2) - Math.max(ax1, bx1));
+  const ih = ay2 < by1 || by2 < ay1 ? 0 : Math.max(0, Math.min(ay2, by2) - Math.max(ay1, by1));
   const inter = iw * ih;
+  if (inter <= 0) return 0;
   const areaA = (ax2 - ax1) * (ay2 - ay1);
-  const areaB = (bx2 - bx1) * (ay2 - by1);
-  return inter / (areaA + areaB - inter + 1e-6);
+  const areaB = (bx2 - bx1) * (by2 - by1);
+  const denom = areaA + areaB - inter;
+  return denom <= 0 ? 0 : inter / (denom + 1e-6);
 }
 
 function nms(boxes: number[][], scores: number[], iouTh = NMS_IOU, limit = MAX_DETECTIONS): number[] {
-  const order = scores.map((s, i) => [s, i]).sort((a, b) => b[0] - a[0]).map(([, i]) => i);
+  const order = scores.map((s, i) => [s, i] as const).sort((a, b) => b[0] - a[0]).map(([, i]) => i);
   const keep: number[] = [];
-  for (const i of order) {
-    if (keep.length >= limit) break;
+  for (let k = 0; k < order.length && keep.length < limit; k++) {
+    const i = order[k];
     let ok = true;
-    for (const j of keep) {
-      if (iou(boxes[i], boxes[j]) > iouTh) { ok = false; break; }
+    for (let j = 0; j < keep.length; j++) {
+      if (iou(boxes[i], boxes[keep[j]]) > iouTh) { ok = false; break; }
     }
     if (ok) keep.push(i);
   }
@@ -83,7 +106,6 @@ function makeAccessor(t: ortTypes.Tensor): Accessor | null {
   const dims = t.dims;
   const data = t.data as Float32Array;
 
-  // 4D: [1,H,W,C] ou [1,C,H,W]
   if (dims.length === 4) {
     const [d0,d1,d2,d3] = dims;
     if (d0 === 1 && d3 >= 5) {
@@ -94,19 +116,13 @@ function makeAccessor(t: ortTypes.Tensor): Accessor | null {
       const C = d1, H = d2, W = d3, N = H * W;
       return { N, C, get: (ch,i) => { const x=i%W; const y=(i-x)/W; return data[ch*H*W + y*W + x]; } };
     }
-  }
-
-  // 3D
-  if (dims.length === 3) {
+  } else if (dims.length === 3) {
     const [a,b,c] = dims;
     if (a === 1 && b >= 5) { const C=b, N=c; return { N, C, get: (ch,i)=>data[ch*N+i] }; }
     if (a === 1 && c >= 5) { const N=b, C=c; return { N, C, get: (ch,i)=>data[i*C+ch] }; }
     if (b === 1 && a >= 5) { const C=a, N=c; return { N, C, get: (ch,i)=>data[ch*N+i] }; }
     if (b === 1 && c >= 5) { const N=a, C=c; return { N, C, get: (ch,i)=>data[i*C+ch] }; }
-  }
-
-  // 2D
-  if (dims.length === 2) {
+  } else if (dims.length === 2) {
     const [a,b] = dims;
     if (a >= 5) { const C=a, N=b; return { N, C, get: (ch,i)=>data[ch*N+i] }; }
     if (b >= 5) { const N=a, C=b; return { N, C, get: (ch,i)=>data[i*C+ch] }; }
@@ -116,7 +132,7 @@ function makeAccessor(t: ortTypes.Tensor): Accessor | null {
   return null;
 }
 
-// ---------- Décodage YOLOv8 (anchor-free) ----------
+// ---------- Décodage YOLOv8 ----------
 const HEAD_GS = [INPUT_SIZE / 8, INPUT_SIZE / 16, INPUT_SIZE / 32].map(v => Math.round(v));
 const HEAD_COUNTS = HEAD_GS.map(g => g * g);
 const HEAD_OFFSETS = [0, HEAD_COUNTS[0], HEAD_COUNTS[0] + HEAD_COUNTS[1]];
@@ -124,7 +140,7 @@ const SUM_HEADS = HEAD_COUNTS.reduce((a,b)=>a+b,0);
 
 function gridInfoForIndex(i: number) {
   if (i < HEAD_OFFSETS[1]) {
-    const g = HEAD_GS[0]; const ii = i - HEAD_OFFSETS[0];
+    const g = HEAD_GS[0]; const ii = i;
     const cx = ii % g, cy = (ii - cx) / g; return { g, cx, cy, stride: INPUT_SIZE / g };
   } else if (i < HEAD_OFFSETS[2]) {
     const g = HEAD_GS[1]; const ii = i - HEAD_OFFSETS[1];
@@ -135,23 +151,27 @@ function gridInfoForIndex(i: number) {
   }
 }
 
+type Letterbox = { sx:number, sy:number, dw:number, dh:number, rw:number, rh:number };
+
 function decodeYoloV8(
   results: Record<string, ortTypes.Tensor>,
-  letter: { sx:number, sy:number, dw:number, dh:number, rw:number, rh:number }
+  letter: Letterbox
 ) {
   const outs = Object.values(results);
   const allBoxes:number[][] = [];
   const allScores:number[] = [];
+
   const minSidePx = Math.max(8, Math.min(letter.rw, letter.rh) * MIN_SIDE_FRAC);
 
-  for (const t of outs) {
-    const acc = makeAccessor(t);
+  for (let tIdx = 0; tIdx < outs.length; tIdx++) {
+    const acc = makeAccessor(outs[tIdx]);
     if (!acc) continue;
     const { N, C, get } = acc;
 
-    const numClasses = Math.max(0, C - 5);
+    const numClasses = C - 5;
     if (numClasses < 1) continue;
 
+    // Stock temporaire par tête pour limite TOPK
     const headBoxes:number[][] = [];
     const headScores:number[] = [];
 
@@ -161,7 +181,8 @@ function decodeYoloV8(
         const gi = gridInfoForIndex(i);
         g = gi.g; cx = gi.cx; cy = gi.cy; stride = gi.stride;
       } else {
-        g = Math.max(1, Math.round(Math.sqrt(N)));
+        g = (Math.sqrt(N) + 0.5) | 0; // floor
+        if (g < 1) g = 1;
         stride = INPUT_SIZE / g;
         cx = i % g;
         cy = (i - cx) / g;
@@ -169,12 +190,12 @@ function decodeYoloV8(
 
       const tx = get(0,i),  ty = get(1,i),  tw = get(2,i),  th = get(3,i);
       const to = get(4,i);
-      const tPerson = get(5 + 0, i);
+      const tPerson = get(5, i); // classe 0 = person
 
       const pObj = sigmoid(to);
+      if (pObj < OBJ_THRESH) continue;
       const pCls = sigmoid(tPerson);
-
-      if (pObj < OBJ_THRESH || pCls < PERSON_THRESH) continue;
+      if (pCls < PERSON_THRESH) continue;
 
       const x = ((sigmoid(tx) * 2 - 0.5) + cx) * stride;
       const y = ((sigmoid(ty) * 2 - 0.5) + cy) * stride;
@@ -186,30 +207,50 @@ function decodeYoloV8(
       const conf = pObj * pCls;
       if (conf < SCORE_THRESH) continue;
 
-      const x1l = x - w/2, y1l = y - h/2, x2l = x + w/2, y2l = y + h/2;
+      const x1l = x - w*0.5, y1l = y - h*0.5, x2l = x + w*0.5, y2l = y + h*0.5;
 
-      const x1 = Math.max(0, (x1l - letter.dw) / letter.sx);
-      const y1 = Math.max(0, (y1l - letter.dh) / letter.sy);
-      const x2 = Math.min(letter.rw, (x2l - letter.dw) / letter.sx);
-      const y2 = Math.min(letter.rh, (y2l - letter.dh) / letter.sy);
+      const invSx = 1 / letter.sx, invSy = 1 / letter.sy;
+      let x1 = (x1l - letter.dw) * invSx;
+      let y1 = (y1l - letter.dh) * invSy;
+      let x2 = (x2l - letter.dw) * invSx;
+      let y2 = (y2l - letter.dh) * invSy;
 
-      if (!isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) continue;
-      if (x2 <= x1 || y2 <= y1) continue;
+      if (x1 < 0) x1 = 0;
+      if (y1 < 0) y1 = 0;
+      if (x2 > letter.rw) x2 = letter.rw;
+      if (y2 > letter.rh) y2 = letter.rh;
+
+      if (!(x2 > x1 && y2 > y1)) continue;
 
       headBoxes.push([x1,y1,x2,y2]);
       headScores.push(conf);
     }
 
     if (headBoxes.length > TOPK_PER_HEAD) {
-      const order = headScores.map((s,i)=>[s,i]).sort((a,b)=>b[0]-a[0]).slice(0, TOPK_PER_HEAD).map(p=>p[1]);
-      for (const idx of order) { allBoxes.push(headBoxes[idx]); allScores.push(headScores[idx]); }
+      const order = headScores.map((s,i)=>[s,i] as const)
+        .sort((a,b)=>b[0]-a[0])
+        .slice(0, TOPK_PER_HEAD)
+        .map(([,i])=>i);
+      for (let k=0; k<order.length; k++) {
+        const idx = order[k];
+        allBoxes.push(headBoxes[idx]);
+        allScores.push(headScores[idx]);
+      }
     } else {
-      allBoxes.push(...headBoxes); allScores.push(...headScores);
+      for (let k=0; k<headBoxes.length; k++) {
+        allBoxes.push(headBoxes[k]);
+        allScores.push(headScores[k]);
+      }
     }
   }
 
   const keep = nms(allBoxes, allScores, NMS_IOU, MAX_DETECTIONS);
-  return keep.map(k => ({ box: allBoxes[k], score: allScores[k], cls: 0, label: 'person' }));
+  const out = new Array(keep.length);
+  for (let i=0; i<keep.length; i++) {
+    const k = keep[i];
+    out[i] = { box: allBoxes[k], score: allScores[k], cls: 0, label: 'person' as const };
+  }
+  return out;
 }
 
 // ---------- Dessin ----------
@@ -224,8 +265,8 @@ function drawDetections(dets: { box:number[], score:number, cls:number, label:st
   const scale = Math.max(cw / vw, ch / vh);
   const rw = vw * scale;
   const rh = vh * scale;
-  const ox = (cw - rw) / 2;
-  const oy = (ch - rh) / 2;
+  const ox = (cw - rw) * 0.5;
+  const oy = (ch - rh) * 0.5;
 
   overlayCtx!.clearRect(0, 0, cw, ch);
   overlayCtx!.lineWidth = 2;
@@ -234,8 +275,10 @@ function drawDetections(dets: { box:number[], score:number, cls:number, label:st
 
   let people = 0;
 
-  for (const det of dets) {
-    const [x1, y1, x2, y2] = det.box;
+  for (let i=0; i<dets.length; i++) {
+    const det = dets[i];
+    const b = det.box;
+    const x1 = b[0], y1 = b[1], x2 = b[2], y2 = b[3];
 
     const vx1 = MIRROR ? (vw - x2) : x1;
     const vx2 = MIRROR ? (vw - x1) : x2;
@@ -249,7 +292,7 @@ function drawDetections(dets: { box:number[], score:number, cls:number, label:st
     overlayCtx!.fillStyle = 'rgba(0,0,0,0.5)';
     overlayCtx!.strokeRect(rx1, ry1, rwc, rhc);
 
-    const label = `${det.label} ${(det.score * 100).toFixed(0)}%`;
+    const label = `${det.label} ${(det.score * 100 + 0.5 | 0)}%`;
     const tw = overlayCtx!.measureText(label).width + 6;
     overlayCtx!.fillRect(rx1, Math.max(0, ry1 - 2), tw, 18);
     overlayCtx!.fillStyle = '#00ff88';
@@ -275,10 +318,9 @@ async function loadOrtWebGPU(): Promise<void> {
     throw new Error('WebGPU non disponible. Active-le (Chrome/Edge/Firefox récent) et utilise HTTPS.');
   }
 
-  // Import strict du backend WebGPU (pas de WASM EP)
   const ortWebgpu = await import('onnxruntime-web/webgpu');
 
-  // Même en WebGPU, ORT peut télécharger des artefacts wasm internes -> on fixe les chemins
+  // Certains artefacts wasm internes : fixer le CDN pour éviter des 404
   (ortWebgpu as any).env.wasm = (ortWebgpu as any).env.wasm || {};
   (ortWebgpu as any).env.wasm.wasmPaths =
     'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
@@ -292,7 +334,6 @@ async function loadOrtWebGPU(): Promise<void> {
 }
 
 async function createSessionWebGPU() {
-  // EP unique: webgpu
   session = await ort.InferenceSession.create(MODEL_PATH, {
     executionProviders: ['webgpu'] as any
   });
@@ -310,58 +351,104 @@ async function createSessionWebGPU() {
 }
 
 let running = false;
+let usingVFC = false;
 
 async function initDetector() {
   await loadOrtWebGPU();
   await createSessionWebGPU();
+  // Optional warmup — une frame noire pour compiler le graph
+  const zero = new Float32Array(3 * SIZE);
+  const warm = new ort.Tensor('float32', INPUT_LAYOUT === 'NCHW'
+    ? zero : zero,
+    INPUT_LAYOUT === 'NCHW'
+      ? [1,3,INPUT_SIZE,INPUT_SIZE]
+      : [1,INPUT_SIZE,INPUT_SIZE,3]
+  );
+  const feeds: Record<string, ortTypes.Tensor> = { [INPUT_NAME]: warm };
+  try { await session!.run(feeds); } catch { /* silencieux */ }
 }
 
-// ---------- Boucle d'inférence ----------
-async function inferLoop() {
-  if (!session || videoEl!.readyState < 2) { requestAnimationFrame(inferLoop); return; }
-  resizeOverlayToVideo();
-
-  // Prétraitement (letterbox + tensor)
-  const vw = Math.max(1, videoEl!.videoWidth), vh = Math.max(1, videoEl!.videoHeight);
+// ---------- Prétraitement réutilisable ----------
+function letterboxAndToTensor(vw:number, vh:number) {
+  // Letterbox -> preprocessCanvas (INPUT_SIZE x INPUT_SIZE)
   const scale = Math.min(INPUT_SIZE / vw, INPUT_SIZE / vh);
-  const nw = Math.round(vw * scale), nh = Math.round(vh * scale);
-  const dx = Math.floor((INPUT_SIZE - nw) / 2);
-  const dy = Math.floor((INPUT_SIZE - nh) / 2);
+  const nw = (vw * scale + 0.5) | 0;
+  const nh = (vh * scale + 0.5) | 0;
+  const dx = ((INPUT_SIZE - nw) / 2 + 0.5) | 0;
+  const dy = ((INPUT_SIZE - nh) / 2 + 0.5) | 0;
 
-  const tmp = document.createElement('canvas');
-  tmp.width = INPUT_SIZE; tmp.height = INPUT_SIZE;
-  const tctx = tmp.getContext('2d')!;
-  tctx.fillStyle = '#000';
-  tctx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-  tctx.drawImage(videoEl!, 0, 0, vw, vh, dx, dy, nw, nh);
+  pctx.setTransform(1, 0, 0, 1, 0, 0);
+  pctx.fillStyle = '#000';
+  pctx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+  pctx.drawImage(videoEl!, 0, 0, vw, vh, dx, dy, nw, nh);
 
-  const { data } = tctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE); // RGBA
-  const size = INPUT_SIZE * INPUT_SIZE;
+  const img = pctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE).data; // RGBA
 
-  let tensor: ortTypes.Tensor;
   if (INPUT_LAYOUT === 'NCHW') {
-    const chw = new Float32Array(3 * size);
-    for (let i = 0; i < size; i++) {
-      chw[i]           = data[i * 4]     / 255;
-      chw[i + size]    = data[i * 4 + 1] / 255;
-      chw[i + size*2]  = data[i * 4 + 2] / 255;
+    // planéifier en CHW
+    // micro-unroll
+    for (let i=0, p=0; i<SIZE; i++, p+=4) {
+      const r = img[p] * (1/255);
+      const g = img[p+1] * (1/255);
+      const b = img[p+2] * (1/255);
+      nchwBuf[i]        = r;
+      nchwBuf[i + SIZE] = g;
+      nchwBuf[i + 2*SIZE] = b;
     }
-    tensor = new ort.Tensor('float32', chw, [1, 3, INPUT_SIZE, INPUT_SIZE]);
   } else {
-    const nhwc = new Float32Array(3 * size);
-    for (let i = 0; i < size; i++) {
-      const o = i * 3;
-      nhwc[o]   = data[i * 4]     / 255;
-      nhwc[o+1] = data[i * 4 + 1] / 255;
-      nhwc[o+2] = data[i * 4 + 2] / 255;
+    for (let i=0, p=0, o=0; i<SIZE; i++, p+=4, o+=3) {
+      nhwcBuf[o]   = img[p]   * (1/255);
+      nhwcBuf[o+1] = img[p+1] * (1/255);
+      nhwcBuf[o+2] = img[p+2] * (1/255);
     }
-    tensor = new ort.Tensor('float32', nhwc, [1, INPUT_SIZE, INPUT_SIZE, 3]);
   }
 
-  const letterbox = { sx: scale, sy: scale, dw: dx, dh: dy, rw: vw, rh: vh };
+  return {
+    tensor: new ort.Tensor(
+      'float32',
+      INPUT_LAYOUT === 'NCHW' ? nchwBuf : nhwcBuf,
+      INPUT_LAYOUT === 'NCHW'
+        ? [1, 3, INPUT_SIZE, INPUT_SIZE]
+        : [1, INPUT_SIZE, INPUT_SIZE, 3]
+    ),
+    letter: { sx: scale, sy: scale, dw: dx, dh: dy, rw: vw, rh: vh } as Letterbox
+  };
+}
 
-  const feeds: Record<string, ortTypes.Tensor> = {};
-  feeds[INPUT_NAME] = tensor;
+// ---------- Boucle d’inférence ----------
+
+type RAFLike = (cb: FrameRequestCallback) => number;
+let vfcHandle = 0;
+let rafHandle = 0;
+
+function scheduleNext(fn: () => void) {
+  if (usingVFC && 'requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+    vfcHandle = (videoEl as any).requestVideoFrameCallback(() => fn());
+  } else {
+    rafHandle = requestAnimationFrame(() => fn());
+  }
+}
+
+function cancelScheduled() {
+  if (vfcHandle && 'cancelVideoFrameCallback' in HTMLVideoElement.prototype) {
+    (videoEl as any).cancelVideoFrameCallback(vfcHandle);
+    vfcHandle = 0;
+  }
+  if (rafHandle) {
+    cancelAnimationFrame(rafHandle);
+    rafHandle = 0;
+  }
+}
+
+async function inferOnce() {
+  if (!session || videoEl!.readyState < 2) return;
+
+  resizeOverlayToVideoIfNeeded();
+
+  const vw = Math.max(1, videoEl!.videoWidth), vh = Math.max(1, videoEl!.videoHeight);
+  const { tensor, letter } = letterboxAndToTensor(vw, vh);
+
+  const feeds: Record<string, ortTypes.Tensor> = { [INPUT_NAME]: tensor };
 
   let results: Record<string, ortTypes.Tensor>;
   try {
@@ -369,7 +456,6 @@ async function inferLoop() {
   } catch (e: any) {
     const msg = String(e?.message || e);
 
-    // IMPORTANT: pas de fallback WASM. On explique l’erreur.
     const softmaxBadAxis =
       msg.includes('softmax only supports last axis for now') ||
       (msg.includes('Softmax') && msg.toLowerCase().includes('failed'));
@@ -381,30 +467,38 @@ async function inferLoop() {
     }
 
     if (msg.includes('Got: 3 Expected: 640') && msg.includes('Got: 640 Expected: 3')) {
-      // on bascule le layout et on retente la frame suivante
       INPUT_LAYOUT = (INPUT_LAYOUT === 'NHWC') ? 'NCHW' : 'NHWC';
       console.warn('Layout auto-switch ->', INPUT_LAYOUT);
-      requestAnimationFrame(inferLoop);
-      return;
+      return; // on retentera à la frame suivante
     }
 
     throw e;
   }
 
-  const dets = decodeYoloV8(results, letterbox);
+  const dets = decodeYoloV8(results, letter);
   drawDetections(dets);
+}
 
-  if (running) requestAnimationFrame(inferLoop);
+async function loop() {
+  if (!running) return;
+  await inferOnce();
+  if (running) scheduleNext(loop);
 }
 
 // ---------- API publique ----------
 export async function startDetection() {
   if (!session) await initDetector();
+
+  // Utiliser rVFC si disponible (collé aux frames vidéo)
+  usingVFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+
   running = true;
-  inferLoop();
+  scheduleNext(loop);
 }
+
 export function stopDetection() {
   running = false;
+  cancelScheduled();
   overlayCtx!.clearRect(0, 0, overlay!.width, overlay!.height);
 }
 
