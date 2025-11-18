@@ -431,7 +431,7 @@
 
   function assignIdentityToTrack(track) {
     if (!track.embedding) return;
-    const IDENTITY_THRESHOLD = 0.65;
+    const IDENTITY_THRESHOLD = 0.67;
     let bestIdentity = null, bestSim = -1;
     for (const ident of identities) {
       const sim = cosineSimilarity(track.embedding, ident.embedding);
