@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>WebGPU Person Detector</title>
+  <title>WebGPU Crowdly</title>
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -232,7 +232,7 @@
 <body>
   <header>
     <div class="badge">WebGPU</div>
-    <h1 class="title">Person Detector</h1>
+    <h1 class="title">Crowdly</h1>
   </header>
 
   <div class="layout">
@@ -431,7 +431,7 @@
 
   function assignIdentityToTrack(track) {
     if (!track.embedding) return;
-    const IDENTITY_THRESHOLD = 0.68;
+    const IDENTITY_THRESHOLD = 0.67;
     let bestIdentity = null, bestSim = -1;
     for (const ident of identities) {
       const sim = cosineSimilarity(track.embedding, ident.embedding);
