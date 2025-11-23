@@ -402,7 +402,7 @@
 
     try {
       session = await ort.InferenceSession.create('yolov8n.onnx', {
-        executionProviders: ['webgpu', 'wasm']
+        executionProviders: ['webgpu']
       });
       inputName = session.inputNames[0];
       console.log('Session YOLO initialisée, input =', inputName);
@@ -412,15 +412,16 @@
     }
 
     try {
-      reidSession = await ort.InferenceSession.create('osnet_reid.onnx', { executionProviders: ['wasm'] });
+      reidSession = await ort.InferenceSession.create('resnet18_reid.onnx', { executionProviders: ['webgpu'] });
       reidInputName = reidSession.inputNames[0];
       reidOutputName = reidSession.outputNames[0];
       console.log('Session OSNet Re-ID initialisée, input =', reidInputName, 'output =', reidOutputName);
     } catch (e) {
-      console.error('Erreur init OSNet Re-ID:', e);
-      statusEl.textContent = 'YOLO OK, mais OSNet Re-ID non initialisé (voir console).';
+      console.error('Erreur init OSNet Re-ID:', e, e?.message, e?.stack);
+      statusEl.textContent = 'YOLO OK, mais OSNet Re-ID non initialisé : ' + (e?.message || e);
       reidSession = null;
     }
+
   }
 
   function cosineSimilarity(a, b) {
