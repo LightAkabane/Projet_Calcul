@@ -79,7 +79,7 @@ cd crowdly
 
    Créer un dossier `models/` et télécharger via les fichiers pythons mis dans le dossier `python/`:
    - [YOLOv8n.onnx](https://github.com/LightAkabane/Projet_Calcul/tree/main/python/get_yolov8_onnx.py)
-   - [ResNet18 Re-ID](https://github.com/LightAkabane/Projet_Calcul/tree/main/python/get_resnet18_onnx.py)
+   - [ResNet18 Re-ID](https://github.com/LightAkabane/Projet_Calcul/tree/main/python/get_resnet_onnx.py)
 
 
 3. **Démarrer un serveur local**
