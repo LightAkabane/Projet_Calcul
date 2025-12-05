@@ -240,8 +240,8 @@ Remplacer `200w.gif` et `200w2.gif` par vos propres images (aspect ratio 4:5 rec
 
 - [ONNX Runtime Web Docs](https://onnxruntime.ai/docs/get-started/with-javascript/)
 - [WebGPU Specification](https://gpuweb.github.io/gpuweb/)
-- [YOLOv8 GitHub](https://github.com/ultralytics/yolov8)
-- [OSNet Re-ID Paper](https://arxiv.org/abs/1905.00953)
+- [YOLOv5 GitHub](https://github.com/ultralytics/yolov5)
+- [OSNet Re-ID Paper](https://docs.pytorch.org/vision/main/models/generated/torchvision.models.resnet18.html)
 
 ## 📝 Licence
 
