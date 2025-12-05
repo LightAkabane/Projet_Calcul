@@ -77,14 +77,10 @@ cd crowdly
 
 2. **Télécharger les modèles ONNX**
 
-   Créer un dossier `models/` et télécharger :
-   - [YOLOv8n.onnx](https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx)
-   - [ResNet18 Re-ID](https://github.com/mikel-brostrom/Yolov8_DeepSORT_Pytorch/releases/download/v1.0/resnet18_reid.onnx)
+   Créer un dossier `models/` et télécharger via les fichiers pythons mis dans le dossier `python/`:
+   - [YOLOv8n.onnx](https://github.com/LightAkabane/Projet_Calcul/tree/main/python/get_yolov8_onnx.py)
+   - [ResNet18 Re-ID](https://github.com/LightAkabane/Projet_Calcul/tree/main/python/get_resnet18_onnx.py)
 
-   ```bash
-   mkdir -p models
-   # Télécharger les deux .onnx dans le dossier models/
-   ```
 
 3. **Démarrer un serveur local**
 
