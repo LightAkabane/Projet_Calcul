@@ -2,6 +2,8 @@
 
 Crowdly est une application web de **détection et suivi en temps réel** de personnes utilisant **WebGPU** pour l'accélération GPU directement dans le navigateur.
 
+ [Démo](https://lightakabane.github.io/Projet_Calcul/) 
+
 ## ✨ Fonctionnalités
 
 - 👁️ **Détection de personnes** en temps réel via YOLOv8n
